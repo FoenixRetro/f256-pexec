@@ -83,8 +83,8 @@ fcreate_open
 		pla
 		fin
 
-		cmp #kernel_event_file_CLOSED
-		beq :error
+		;cmp #kernel_event_file_CLOSED  ; skip this event
+		;beq :error
         cmp #kernel_event_file_NOT_FOUND
         beq :error
 		cmp #kernel_event_file_OPENED
@@ -228,8 +228,7 @@ fread
 ; LAME PROGRESS INDICATOR
 ;-----------------------------------------------------------------------------
 
-		lda #'.'
-		jsr TermCOUT
+		jsr ProgressIndicator
 
 ;-----------------------------------------------------------------------------
 		inc file_bytes_read+1

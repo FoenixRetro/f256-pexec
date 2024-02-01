@@ -8,6 +8,7 @@
 ;
 ;         Load->Run PGX files
 ;         Load->Run PGZ files
+;         Load->Run KUP files
 ;         Load-Display 256 Picture files
 ;         Load-Display LBM Picture files
 ;  
@@ -64,7 +65,20 @@ event_file_data_wrote = event_type+kernel_event_event_t_file_wrote_wrote
 args_buf = $40
 args_buflen = $42
 
-old_sp = $A0
+	dum $70
+temp7 ds 4
+temp8 ds 4
+temp9 ds 4
+temp10 ds 4
+
+progress ds 2     ; progress counter
+show_prompt ds 1  ; picture viewer can hide the press key prompt
+	dend
+
+
+; copy of the mmu_lock function, down to zero page
+
+mmu_lock_springboard = $80
 
 ; File uses $B0-$BF
 ; Term uses $C0-$CF
@@ -93,11 +107,6 @@ sig		db $f2,$56		; signature
 		db 0
 
 start
-		;tsx
-		;stx old_sp
-		;ldx #$FF
-		;txs
-
 		; store argument list, but skip over first argument (us)
 		lda	kernel_args_ext
 		clc
@@ -112,7 +121,13 @@ start
 		dec
 		sta	args_buflen
 
+		; Some variable initialization
+		stz progress
+		stz progress+1
+		stz show_prompt  ; default to show the press key prompt
+
 		; Terminal Init
+		jsr initColors	; default the color palette
 		jsr TermInit
 
 		; mmu help functions are alive
@@ -123,7 +138,32 @@ start
 		ldx #>txt_version
 		jsr TermPUTS
 
+
+		; giant text test
+
+		ldx #16
+		ldy #1
+		jsr TermSetXY
+
+		lda #<txt_glyph_pexec
+		ldx #>txt_glyph_pexec
+		jsr glyph_puts
+
+		; load stuff banner
+		ldx #16
+		ldy #8
+		jsr TermSetXY
+
+		lda #<txt_load_stuff
+		ldx #>txt_load_stuff
+		jsr TermPUTS
+
+
 		; Display what we're trying to do
+		ldx #0
+		ldy #10
+		jsr TermSetXY
+
 		lda #<txt_launch
 		ldx #>txt_launch
 		jsr TermPUTS
@@ -215,12 +255,16 @@ start
 :got4
 		jsr execute_file
 
-		; $$DO SOMETHING
-
 wait_for_key
+
+		lda show_prompt
+		bne :skip_prompt
+
 		lda #<txt_press_key
 		ldx #>txt_press_key
 		jsr TermPUTS
+
+:skip_prompt
 
 ]loop
 		lda #<event_type
@@ -238,8 +282,7 @@ wait_for_key
 		;jsr TermPrintAH
 		bra ]loop
 :done
-		jmp mmu_lock
-		rts
+		jmp mmu_lock   ; jsr+rts
 
 ;------------------------------------------------------------------------------
 ;
@@ -258,12 +301,30 @@ execute_file
 		beq :256
 		cmp #'F'
 		beq :lbm
+		cmp #$F2
+		beq :kup
 :done
 		lda #<txt_unknown
 		ldx #>txt_unknown
 		jsr TermPUTS
 
 		rts
+
+;------------------------------------------------------------------------------
+; Load /run KUP (Kernel User Program)
+:kup
+		lda temp0+1
+		cmp #$56
+		bne :done
+		lda temp0+2 	; size in blocks
+		beq :done   	; size 0, invalid
+		cmp #6
+		bcs :done       ; size larger than 40k, invalid
+		lda temp0+3		; address mapping of block
+		beq	:done       ; can't map you in at block 0
+		cmp #6
+		bcs :done		; can't map you in at block 6 or higher
+		jmp LoadKUP
 
 ;------------------------------------------------------------------------------
 ; Load / run pgZ Program
@@ -304,7 +365,10 @@ execute_file
 		jsr init320x240
 		jsr set_srcdest_pixels
 		jsr decompress_pixels
-		rts
+
+		inc show_prompt   ; don't show prompt
+
+		jmp TermClearTextBuffer  ; jsr+rts
 ;
 :lbm
 		lda temp0+1
@@ -337,7 +401,9 @@ execute_file
 		jsr set_srcdest_pixels
 		jsr lbm_decompress_pixels
 
-		rts
+		inc show_prompt   ; don't show prompt
+
+		jmp TermClearTextBuffer  ; jsr+rts
 ;-----------------------------------------------------------------------------
 LoadPGX
 		lda #<temp0
@@ -364,12 +430,32 @@ LoadPGX
 		tax
 		ldy #1
 		jsr fread
-		jsr fclose
+
+launchProgram
+		jsr fclose	; close PGX or PGZ
 		
-		jsr mmu_lock
+		lda #5
+		sta old_mmu0+5	; when lock is called it will map $A000 to physcial $A000
+
+		; need to place a copy of mmu_lock, where it won't be unmapped
+		ldx #mmu_lock_end-mmu_lock
+]lp		lda mmu_lock,x
+		sta mmu_lock_springboard,x
+		dex
+		bpl ]lp
+
+		; construct more stub code
+		lda #$20   ; jsr mmu_lock_springboard
+		sta temp0
+		lda #<mmu_lock_springboard
+		sta temp0+1
+		lda #>mmu_lock_springboard
+		sta temp0+2 
 
 		lda #$4c
-		sta temp1-1
+		sta temp1-1  ; same as temp0+3
+
+		; temp1, and temp1+1 contain the start address
 
 		lda args_buf
 		sta kernel_args_ext
@@ -378,7 +464,7 @@ LoadPGX
 		lda args_buflen
 		sta kernel_args_extlen
 		
-		jmp temp1-1
+		jmp temp0	; will jsr mmu_lock, then jmp to the start
 
 ;-----------------------------------------------------------------------------
 LoadPGz
@@ -406,7 +492,7 @@ LoadPGz
 		ora PGz_size+1
 		ora PGz_size+2
 		ora PGz_size+3
-		beq launchProgram
+		beq pgzDoneLoad
 		
 		lda PGz_addr
 		ldx PGz_addr+1
@@ -424,8 +510,6 @@ LoadPGz
 		jsr set_write_address
 		lda #8
 		bra ]loop
-
-		bra launchProgram
 
 ;-----------------------------------------------------------------------------
 LoadPGZ
@@ -452,7 +536,7 @@ LoadPGZ
 		lda temp1
 		ora temp1+1
 		ora temp1+2
-		beq launchProgram
+		beq pgzDoneLoad
 		
 		lda temp0+1
 		ldx temp0+2
@@ -471,20 +555,66 @@ LoadPGZ
 		lda #6
 		bra ]loop
 
-launchProgram
-		lda #$4c
-		sta temp0
+pgzDoneLoad
 
-		lda args_buf
-		sta kernel_args_ext
-		lda args_buf+1
-		sta kernel_args_ext+1
-		lda args_buflen
-		sta kernel_args_extlen
+		; copy the start location, for the launch code fragment 
+		lda temp0+1
+		sta temp1
+		lda temp0+2
+		sta temp1+1
 
-		jsr mmu_lock
+		jmp launchProgram  ; share cleanup with PGX launcher
 
-		jmp temp0
+;-----------------------------------------------------------------------------
+; Load /run KUP (Kernel User Program)
+LoadKUP
+		; Open the File again (seek back to 0)
+		lda	#1
+		jsr	get_arg
+		jsr TermPUTS
+
+		lda	#1
+		jsr	get_arg
+		jsr fopen 
+
+; Set the address where we read data
+
+		lda temp0+3 ; mount address
+		clc
+		ror
+		ror
+		ror
+		ror
+		tax
+		lda #0
+		tay
+
+		sta temp0		; start address of where we're loading
+		stx temp0+1
+
+		jsr set_write_address
+
+; Now ask for data from the file, let's be smart here, and ask for the
+; max conceivable size that will fit.
+
+		sec
+		lda #$C0
+		sbc temp0+1
+		tax			; Should yield $A000 as largest possible address
+		lda #0      ;
+		tay
+		jsr fread
+
+		ldy #4
+		lda (temp0),y
+		sta temp1
+		iny
+		lda (temp0),y
+		sta temp1+2
+
+		jmp launchProgram	; close, fix mmu, start
+
+
 ;-----------------------------------------------------------------------------
 load_image
 ; $10000, for the bitmap
@@ -579,7 +709,7 @@ init320x240
 		stz io_ctrl
 
 		; enable the graphics mode
-		lda #%00001111	; gamma + bitmap + graphics + overlay + text
+		lda #%01001111	; gamma + bitmap + graphics + overlay + text
 ;		lda #%00000001	; text
 		sta $D000
 		;lda #%110       ; text in 40 column when it's enabled
@@ -626,12 +756,68 @@ get_arg
 		lda (kernel_args_ext),y
 		rts
 
+;------------------------------------------------------------------------------
+;
+;
+ProgressIndicator 
 
+		lda #'.'
+		jsr TermCOUT
 
+		dec progress+1
+		bpl :return
+
+		lda #16
+		sta progress+1
+
+		ldx term_x
+		phx
+		ldy term_y
+		phy
+
+		clc
+		lda progress
+		inc
+		cmp #64
+		bcc :no_wrap
+
+		dec
+		adc #4
+		tax
+
+		ldy #51
+		jsr TermSetXY
+
+		lda #G_SPACE 	 ; erase the dude
+		jsr glyph_draw
+		
+		clc
+		lda #0     		 ; wrap to left
+:no_wrap
+		sta progress
+		adc #5
+		tax
+
+		ldy #51
+		jsr TermSetXY
+
+		clc
+		lda progress
+		and #$3
+		adc #GRUN0
+
+		jsr glyph_draw   	; running man
+
+		ply
+		plx
+		jsr TermSetXY
+
+:return
+		rts
 
 ;------------------------------------------------------------------------------
 ; Strings and other includes
-txt_version asc 'Pexec 0.02'
+txt_version asc 'Pexec 0.61'
 		db 13,13,0
 
 txt_press_key db 13
@@ -661,14 +847,23 @@ txt_no_argument asc 'Missing file argument'
 		db 13
 		db 0
 
+txt_load_stuff asc 'Load your stuff: .pgx, .pgz, .kup, .lbm, .256',00
+
+
+txt_glyph_pexec
+		db GP,GE,GX,GE,GC,0
+
+;------------------------------------------------------------------------------
 		put mmu.s
 		put term.s
 		put lbm.s
 		put i256.s
 		put lzsa2.s
 		put file.s
+		put glyphs.s
+		put colors.s
 
 ; pad to the end
 		ds $C000-*,$EA
 ; really pad to end, because merlin is buggy
-		ds \
+		ds \,$EA
