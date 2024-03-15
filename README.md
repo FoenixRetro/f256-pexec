@@ -36,7 +36,9 @@ KUP programs limited to start addresses in Slot 1-5, and a maximum size of 40k
 Why aren't we at 1.0, we are missing these features, if anyone wants to
 contribute.
 
-     - Support for device #'s beyond 0
+     - Display Encontrerasd's logo
+
+     - PATH support
 
      - File Chooser (if no args passed, or file not found this would be
        really nice.  Something like Bitsy Bye for those familiar)
